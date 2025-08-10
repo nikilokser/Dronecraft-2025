@@ -4,6 +4,7 @@ import sys
 from pyzbar import pyzbar
 import cv2
 import rospy
+import time
 from clover.srv import SetLEDEffect
 from std_srvs.srv import Trigger
 
@@ -12,10 +13,11 @@ from skyros.drone import Drone
 set_effect = rospy.ServiceProxy('led/set_effect', SetLEDEffect)
 land = rospy.ServiceProxy('land', Trigger)
 
-stream_url = "http://192.168.1.69:8080/stream?topic=/qr_detected_images"
+stream_url = "http://192.168.1.88:8080/stream?topic=/qr_detected_images"
 
 number_of_drones = 3
 
+b_data = ""
 drones_ready = []
 qr_found = False
 
@@ -63,7 +65,8 @@ def handle_message(msg):
                 logging.info(f"{len(set(drones_ready))} is arrived to point")
             else:
                 logging.info(f"Waiting for drones arriving {drones_ready}")
-
+        elif "all drones ready" in msg:
+            set_effect(effect='flash', r=0, g=255, b=0)
         else:
             logging.warning(f"Failed to parse JSON: {msg}")
 
@@ -98,7 +101,6 @@ with Drone(network_id=0x12, wifi_channel=10, tx_power=11, uart_port="/dev/ttyAMA
     drone.takeoff(z=1.5)
     drone.wait(5)
     
-
     # Master drone logic: drone with lowest ID becomes master
     discovered_drones = drone.get_discovered_drones()
     all_drones = discovered_drones | {drone.drone_id}
@@ -108,50 +110,24 @@ with Drone(network_id=0x12, wifi_channel=10, tx_power=11, uart_port="/dev/ttyAMA
         logging.info(f"Drone {drone.drone_id} is MASTER - controlling swarm")
         
         # Master sends individual coordinates to each drone
-        discovered_drones = drone.get_discovered_drones()
-        
-        # Send coordinates to each drone separately
-        for target_drone_id in discovered_drones:
-            # Different coordinates for each drone
-            coordinates = {
-                111: {"x": 1.0, "y": 0, "z": 2},
-                88: {"x": 0, "y": -1, "z": 2}
-            }.get(target_drone_id, {"x": 0, "y": 0, "z": 1})
-            
-            # Compact format for individual drone
-            flight_command = {
-                "t": "fc",  # flight_command
-                "m": drone.drone_id,  # master_id
-                "d": target_drone_id,  # target drone id
-                "x": coordinates["x"],
-                "y": coordinates["y"],
-                "z": coordinates["z"]
-            }
-            
-            json_msg = json.dumps(flight_command)
-            logging.info(f"Master sending to drone {target_drone_id}: {json_msg} ({len(json_msg)} chars)")
-            
-            for i in range(20):
-                drone.broadcast_custom_message(json_msg)
-                drone.wait(0.4)
 
         # Master flies to its position
-        drone.navigate_with_avoidance(x=-0, y=0.0, z=4)
-
-        while len(set(drones_ready)) < number_of_drones-1:
-            pass
-            
-
-        drone.broadcast_custom_message("all drones ready")
-        logging.info("All drones are ready, led turns on")
-        set_effect(effect='flash', r=0, g=255, b=0)
+        drone.navigate_with_avoidance(x=0, y=-1.0, z=3)
 
         cap = cv2.VideoCapture(stream_url)
 
         if cap.isOpened():
             logging.info("Stream successfully opened")
             qr_found = False
+            start_time = time.time()  # Записываем время начала
+            timeout = 5  # Таймаут в секундах
+            
             while True:
+                # Проверяем, не прошло ли 10 секунд
+                if time.time() - start_time > timeout:
+                    logging.warning(f"QR detection timeout after {timeout} seconds")
+                    break
+                
                 ret, frame = cap.read()
                 if ret:
                     
@@ -169,6 +145,105 @@ with Drone(network_id=0x12, wifi_channel=10, tx_power=11, uart_port="/dev/ttyAMA
                     logging.error("Stream empty")
                     break
             cap.release()
+
+            if b_data == "":
+                drone.navigate_with_avoidance(x=-1, y=1.0, z=3)
+                cap = cv2.VideoCapture(stream_url)
+
+                if cap.isOpened():
+                    logging.info("Stream successfully opened")
+                    qr_found = False
+                    start_time = time.time()  # Записываем время начала
+                    timeout = 5  # Таймаут в секундах
+                    
+                    while True:
+                        # Проверяем, не прошло ли 10 секунд
+                        if time.time() - start_time > timeout:
+                            logging.warning(f"QR detection timeout after {timeout} seconds")
+                            break
+                        
+                        ret, frame = cap.read()
+                        if ret:
+                            
+                            barcodes = pyzbar.decode(frame)
+                            for barcode in barcodes:
+                                b_data = barcode.data.decode('utf-8')
+
+                                if b_data:
+                                    logging.info(f"QR with data: {b_data}")
+                                    qr_found = True
+                                    break
+                            if qr_found:
+                                break    
+                        else:
+                            logging.error("Stream empty")
+                            break
+                    cap.release()
+
+            discovered_drones = drone.get_discovered_drones()
+        
+        # Send coordinates to each drone separately
+        for target_drone_id in discovered_drones:
+            # Different coordinates for each drone
+            if b_data == "37DDS":
+                coordinates = {
+                    111: {"x": 0, "y": 1, "z": 2},
+                    126: {"x": 0, "y": 0, "z": 2}
+                }.get(target_drone_id, {"x": 0, "y": 0, "z": 1})
+            
+            # Compact format for individual drone
+                flight_command = {
+                    "t": "fc",  # flight_command
+                    "m": drone.drone_id,  # master_id
+                    "d": target_drone_id,  # target drone id
+                    "x": coordinates["x"],
+                    "y": coordinates["y"],
+                    "z": coordinates["z"]
+                }
+            
+                json_msg = json.dumps(flight_command)
+                logging.info(f"Master sending to drone {target_drone_id}: {json_msg} ({len(json_msg)} chars)")
+                
+                for i in range(20):
+                    drone.broadcast_custom_message(json_msg)
+                    drone.wait(0.4)
+
+            if b_data == "30DSS":
+                coordinates = {
+                    111: {"x": 0, "y": 0, "z": 2},
+                    126: {"x": 0, "y": -1, "z": 2}
+                }.get(target_drone_id, {"x": 0, "y": 0, "z": 1})
+            
+            # Compact format for individual drone
+                flight_command = {
+                    "t": "fc",  # flight_command
+                    "m": drone.drone_id,  # master_id
+                    "d": target_drone_id,  # target drone id
+                    "x": coordinates["x"],
+                    "y": coordinates["y"],
+                    "z": coordinates["z"]
+                }
+            
+                json_msg = json.dumps(flight_command)
+                logging.info(f"Master sending to drone {target_drone_id}: {json_msg} ({len(json_msg)} chars)")
+                
+                for i in range(20):
+                    drone.broadcast_custom_message(json_msg)
+                    drone.wait(0.4)
+            
+        if b_data == "37DDS":
+            drone.navigate_with_avoidance(x=-1, y=1.0, z=3)
+        elif b_data == "30DSS":
+            drone.navigate_with_avoidance(x=0, y=1.0, z=3)
+
+        while len(set(drones_ready)) < number_of_drones-1:
+            pass
+            
+        drone.broadcast_custom_message("all drones ready")
+        logging.info("All drones are ready, led turns on")
+        set_effect(effect='flash', r=0, g=255, b=0)
+
+        drone.wait(3)
 
 
     else:
@@ -198,6 +273,8 @@ with Drone(network_id=0x12, wifi_channel=10, tx_power=11, uart_port="/dev/ttyAMA
             drone.wait(0.4)
 
         set_effect(effect='flash', r=0, g=255, b=0)
+
+        drone.wait(3)
 
         while qr_found == False:
             pass
