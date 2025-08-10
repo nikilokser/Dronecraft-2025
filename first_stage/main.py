@@ -71,7 +71,7 @@ def handle_message(msg):
             logging.warning(f"Failed to parse JSON: {msg}")
 
 
-with Drone(network_id=0x12, wifi_channel=6, tx_power=11, uart_port="/dev/ttyAMA1") as drone:
+with Drone(network_id=0x12, wifi_channel=10, tx_power=11, uart_port="/dev/ttyAMA1") as drone:
     drone.set_custom_message_callback(handle_message)
 
     # Send start json message to other drones
