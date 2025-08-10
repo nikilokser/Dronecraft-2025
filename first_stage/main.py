@@ -12,14 +12,15 @@ from skyros.drone import Drone
 set_effect = rospy.ServiceProxy('led/set_effect', SetLEDEffect)
 land = rospy.ServiceProxy('land', Trigger)
 
-stream_url = "http://172.22.148.95:8080/stream?topic=/qr_detected_images"
+stream_url = "http://192.168.1.69:8080/stream?topic=/qr_detected_images"
 
-number_of_drones = 4
+number_of_drones = 3
 coords_map = [[-1.5, 1.5], [0, 1.5], [1.5, 1.5],
               [-1.5, 0], [0, 0], [1.5, 0],
               [-1.5, -1.5], [0, -1.5], [1.5, -1.5]]
 
 drones_ready = []
+qr_found = False
 
 
 def setup_logger(verbose=False, quiet=False):
@@ -58,7 +59,14 @@ def handle_message(msg):
     except Exception:
         if "point" in msg:
             drones_ready.append(msg.split()[0] if msg.split()[0] not in drones_ready else None)
-            logging.info(msg)
+            logging.error(msg)
+
+            old_number_drones_ready = len(set(drones_ready))
+            if len(set(drones_ready)) != old_number_drones_ready:
+                logging.info(f"{len(set(drones_ready))} is arrived to point")
+            else:
+                logging.info(f"Waiting for drones arriving {drones_ready}")
+
         else:
             logging.warning(f"Failed to parse JSON: {msg}")
 
@@ -76,7 +84,7 @@ with Drone(network_id=0x12, wifi_channel=6, tx_power=11, uart_port="/dev/ttyAMA1
     drone.broadcast_custom_message(json.dumps(start_message))
 
     # Wait for other drones to start
-    if drone.wait_for_drones(n=number_of_drones-1, timeout=30.0):
+    if drone.wait_for_drones(n=number_of_drones-1, timeout=60.0):
         # Get network status with detailed info
         status = drone.get_network_status()
 
@@ -86,11 +94,13 @@ with Drone(network_id=0x12, wifi_channel=6, tx_power=11, uart_port="/dev/ttyAMA1
             logging.info(
                 f"  drone_{drone_id}: pos=({pos['x']:.1f},{pos['y']:.1f},{pos['z']:.1f}) "
             )
-        drone.wait(5)
+        drone.wait(1)
 
     # Take off
-    drone.takeoff(z=1.0)
+
+    drone.takeoff(z=1.5)
     drone.wait(5)
+    
 
     # Master drone logic: drone with lowest ID becomes master
     discovered_drones = drone.get_discovered_drones()
@@ -107,9 +117,8 @@ with Drone(network_id=0x12, wifi_channel=6, tx_power=11, uart_port="/dev/ttyAMA1
         for target_drone_id in discovered_drones:
             # Different coordinates for each drone
             coordinates = {
-                216: {"x": 1.0, "y": 0, "z": 1.7},
-                231: {"x": 0, "y": 1, "z": 1.7},
-                95: {"x": 0, "y": -1, "z": 1.7}
+                111: {"x": 1.0, "y": 0, "z": 2},
+                88: {"x": 0, "y": -1, "z": 2}
             }.get(target_drone_id, {"x": 0, "y": 0, "z": 1})
             
             # Compact format for individual drone
@@ -125,20 +134,20 @@ with Drone(network_id=0x12, wifi_channel=6, tx_power=11, uart_port="/dev/ttyAMA1
             json_msg = json.dumps(flight_command)
             logging.info(f"Master sending to drone {target_drone_id}: {json_msg} ({len(json_msg)} chars)")
             
-            for i in range(5):
+            for i in range(20):
                 drone.broadcast_custom_message(json_msg)
-                drone.wait(0.2)
+                drone.wait(0.4)
 
         # Master flies to its position
-        drone.navigate_with_avoidance(x=-1.0, y=0.0, z=1.7)
+        drone.navigate_with_avoidance(x=-0, y=0.0, z=4)
 
-
-        while len(set(drones_ready)) < 3:
+        while len(set(drones_ready)) < number_of_drones-1:
             pass
+            
 
         drone.broadcast_custom_message("all drones ready")
         logging.info("All drones are ready, led turns on")
-        set_effect(r=0, g=255, b=0)
+        set_effect(effect='flash', r=0, g=255, b=0)
 
         cap = cv2.VideoCapture(stream_url)
 
@@ -169,13 +178,12 @@ with Drone(network_id=0x12, wifi_channel=6, tx_power=11, uart_port="/dev/ttyAMA1
         logging.info(f"Drone {drone.drone_id} is SLAVE - waiting for master commands")
         
         # Wait for master commands and execute them
-        drone.wait(1)  # Wait for master to send commands
+        drone.wait(5)  # Wait for master to send commands
 
-        if len(set(drones_ready)) == 3:
-            set_effect(r=0, g=255, b=0)
 
-        
-        # Execute received coordinates if available
+        while slave_target == None:
+            pass 
+
         if slave_target:
             logging.info(f"Slave {drone.drone_id} flying to: {slave_target}")
             drone.navigate_with_avoidance(
@@ -186,9 +194,17 @@ with Drone(network_id=0x12, wifi_channel=6, tx_power=11, uart_port="/dev/ttyAMA1
         else:
             logging.warning(f"Slave {drone.drone_id} no target received, flying to default")
             drone.navigate_with_avoidance(x=0.0, y=0.0, z=1.0)
-            for _ in range(5):
-                drone.broadcast_custom_message(f"{drone.drone_id} point")
-                drone.wait(0.2)
+        
+        for _ in range(20):
+            drone.broadcast_custom_message(f"{drone.drone_id} point")
+            drone.wait(0.4)
+
+        while len(set(drones_ready)) < number_of_drones-1:
+            pass
+        set_effect(effect='flash', r=0, g=255, b=0)
+
+        while qr_found == False:
+            pass
 
     # Broadcast message to other drones
     # drone.broadcast_custom_message(f"Hello from drone_{drone.drone_id}!")
